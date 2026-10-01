@@ -10,8 +10,6 @@ import re
 import os
 import secrets
 import smtplib
-import threading
-from collections import deque
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from functools import wraps
@@ -38,25 +36,12 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "noreply@innovatered.com")
 CONTACT_TO = os.getenv("CONTACT_TO", "ben.marum@innovatered.com")
 SEED_TEST_EMAIL = os.getenv("SEED_TEST_EMAIL", "demo@innovatered.local").strip().lower()
-SEED_TEST_PASSWORD = os.getenv("SEED_TEST_PASSWORD", "RedTest-2026!")
-
-# Keep a small, process-local diagnostic trail for the debug health endpoint.
-_recent_log_lines: deque[str] = deque(maxlen=30)
-_recent_log_lock = threading.Lock()
-
+# No default: the demo account exists only when Render sets SEED_TEST_PASSWORD.
+SEED_TEST_PASSWORD = os.getenv("SEED_TEST_PASSWORD", "").strip()
 
 def _record_log(message: str, *args: Any, level: int = logging.INFO) -> None:
-    """Log an auth/contact event and retain a redacted diagnostic line in memory."""
-    rendered = message % args if args else message
-    timestamp = datetime.now(timezone.utc).isoformat()
-    with _recent_log_lock:
-        _recent_log_lines.append(f"{timestamp} {rendered}")
+    """Log an auth/contact event to the private server log only."""
     log.log(level, message, *args)
-
-
-def _recent_logs() -> list[str]:
-    with _recent_log_lock:
-        return list(_recent_log_lines)
 
 
 # In-memory bearer tokens for staging demo (token -> user_id).
@@ -139,19 +124,6 @@ def create_app() -> Flask:
     def health():
         return jsonify({"status": "ok", "service": "red-api"})
 
-    @app.get("/debug/health")
-    def debug_health():
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return jsonify(
-            {
-                "status": "ok",
-                "service": "red-api",
-                "mail_mode": MAIL_MODE,
-                "db_scheme": DATABASE_URL.split(":", 1)[0],
-                "recent_log_lines": _recent_logs(),
-            }
-        )
 
     @app.get("/db/ping")
     def db_ping():
@@ -256,11 +228,19 @@ def create_app() -> Flask:
 
 
 def _seed_demo_user() -> None:
-    """Create the non-production shared demo account when it is absent."""
+    """Create the shared demo account, or reset its password, from SEED_TEST_PASSWORD.
+
+    With no SEED_TEST_PASSWORD set, no demo account is created.
+    """
+    if len(SEED_TEST_PASSWORD) < 8:
+        _record_log("demo login seed skipped; SEED_TEST_PASSWORD not set", level=logging.WARNING)
+        return
     with SessionLocal() as db:
         existing = db.scalar(select(User).where(User.email == SEED_TEST_EMAIL))
         if existing:
-            _record_log("demo login seed checked; existing user %s", SEED_TEST_EMAIL)
+            existing.password_hash = generate_password_hash(SEED_TEST_PASSWORD)
+            db.commit()
+            _record_log("demo login seed reset password for existing demo user")
             return
         db.add(
             User(

@@ -53,7 +53,6 @@ flask --app main run --host 0.0.0.0 --port 8000
 
 Health: `http://127.0.0.1:8000/health`
 
-Debug health (mail mode, DB scheme, recent auth/contact lines): `http://127.0.0.1:8000/debug/health`
 
 DB ping: `http://127.0.0.1:8000/db/ping`
 
@@ -70,9 +69,10 @@ gunicorn main:app --bind 0.0.0.0:$PORT
 The free service is configured for `MAIL_MODE=log` and
 `DATABASE_URL=sqlite:///./red.db`. SQLite is ephemeral on Render's free tier,
 so this is suitable for the demo only; use a persistent Postgres database before
-production. Set `SEED_TEST_PASSWORD` in Render if the default shared demo
-password should be replaced. On boot, the API seeds `demo@innovatered.local`
-when that user is missing; it never logs the password.
+production. The shared demo account exists only when `SEED_TEST_PASSWORD` is set in
+Render's environment. There is no default in code. On boot, the API creates
+`demo@innovatered.local` or resets its password to that value; it never logs
+the password.
 
 ## Contact / email
 
