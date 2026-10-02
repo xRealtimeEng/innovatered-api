@@ -49,9 +49,18 @@ def _record_log(message: str, *args: Any, level: int = logging.INFO) -> None:
 _tokens: dict[str, int] = {}
 
 
+def _normalize_db_url(url: str) -> str:
+    """Point Postgres URLs at the psycopg (v3) driver; leave others unchanged."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def make_engine():
-    connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-    return create_engine(DATABASE_URL, connect_args=connect_args)
+    url = _normalize_db_url(DATABASE_URL)
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    return create_engine(url, connect_args=connect_args)
 
 
 engine = make_engine()
