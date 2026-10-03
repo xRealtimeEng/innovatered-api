@@ -35,6 +35,9 @@
   .tabs button{background:var(--navy2);border:1px solid var(--line);color:var(--ink);padding:5px 10px;border-radius:8px;cursor:pointer;font:inherit}
   .tabs button.on{border-color:var(--red);color:#fff}
   svg{display:block;width:100%}
+  .charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:12px}
+  .chart .legend{display:flex;gap:12px;font-size:12px;color:var(--mute);margin-top:4px}.chart .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle}
+  .chart .now{float:right;font-size:13px;color:var(--ink)}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} @media(max-width:900px){.row{grid-template-columns:1fr}}
   .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px} .kv div:nth-child(odd){color:var(--mute)}
   footer{color:var(--mute);font-size:12px;padding:20px 22px;text-align:center}
@@ -48,6 +51,7 @@
   <nav id="nav"></nav>
 </header>
 <main>
+  <section id="live"></section>
   <section id="overview"></section>
   <section id="database"></section>
   <section id="connections"></section>
@@ -56,10 +60,10 @@
   <section id="routes"></section>
   <section id="browse"></section>
 </main>
-<footer>Local and private: this page only answers on this machine. Auto-refresh every 5 seconds. <span id="updated"></span></footer>
+<footer>Local and private: this page only answers on this machine. Live graphs update every 2 seconds, other tabs every 5. <span id="updated"></span></footer>
 <script>
-const TABS=[["overview","Overview"],["database","Database"],["connections","Connections"],["traffic","Traffic"],["users","Users"],["routes","Endpoints"],["browse","Browse data"]];
-let tab=location.hash.slice(1)||"overview", browseTable=null;
+const TABS=[["live","Live"],["overview","Overview"],["database","Database"],["connections","Connections"],["traffic","Traffic"],["users","Users"],["routes","Endpoints"],["browse","Browse data"]];
+let tab=location.hash.slice(1)||"live", browseTable=null;
 const $=s=>document.querySelector(s);
 const esc=v=>v==null?'<span class="sub">–</span>':String(v).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ago=iso=>{if(!iso)return"–";const s=(Date.now()-new Date(iso))/1000;if(s<60)return Math.round(s)+"s ago";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago"};
@@ -127,9 +131,46 @@ const R={
   $("#browse").innerHTML=`<div class="tabs">${ts.map(t=>`<button class="${t.name===browseTable?"on":""}" onclick="browseTable='${t.name}';refresh()">${esc(t.name)} (${t.rows})</button>`).join("")}</div>
   <div class="sub" style="margin-bottom:6px">Newest 100 rows. Password hashes are hidden.</div>${tableHTML(d.columns.map(c=>[c,c]),d.rows)}`;}
 };
-async function refresh(){try{await R[tab]();$("#updated").textContent="Updated "+new Date().toLocaleTimeString()}catch(e){$("#status").className="pill bad";$("#status").textContent="API not reachable";console.error(e)}}
+
+const fmtB=v=>v<1024?Math.round(v)+" B/s":v<1048576?(v/1024).toFixed(1)+" KB/s":(v/1048576).toFixed(2)+" MB/s";
+const fmtN=d=>v=>(+v).toFixed(d);
+let liveBuf=[],liveLast=0;
+function lineChart(title,series,fmt,opts={}){
+  const W=600,H=opts.h||150,P=4,n=liveBuf.length;
+  const vals=series.flatMap(s=>liveBuf.map(x=>+(x[s.k]??0)));
+  let max=Math.max(opts.min||0,...vals,0.0001); if(opts.max)max=opts.max;
+  const t0=n?liveBuf[0].t:0,t1=n?liveBuf[n-1].t:1,span=Math.max(1,t1-t0);
+  const X=t=>P+(t-t0)/span*(W-2*P),Y=v=>H-P-(v/max)*(H-2*P-12);
+  const paths=series.map(s=>{if(n<2)return"";const pts=liveBuf.map(x=>`${X(x.t).toFixed(1)},${Y(+(x[s.k]??0)).toFixed(1)}`);
+    return (s.fill?`<path d="M${X(t0)},${H-P} L${pts.join(" L")} L${X(t1)},${H-P} Z" fill="${s.color}" opacity=".18"/>`:"")+`<polyline points="${pts.join(" ")}" fill="none" stroke="${s.color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`}).join("");
+  const grid=[.25,.5,.75,1].map(f=>`<line x1="0" x2="${W}" y1="${Y(max*f)}" y2="${Y(max*f)}" stroke="#1f3a57" stroke-width="1"/>`).join("");
+  const last=liveBuf[n-1]||{};
+  return `<div class="card chart"><h3>${title}<span class="now">${series.map(s=>`<span style="color:${s.color}">${fmt(last[s.k]??0)}</span>`).join(" · ")}</span></h3>
+  <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">${grid}<text x="${W-4}" y="12" fill="#8aa0b6" font-size="11" text-anchor="end">${fmt(max)}</text>${paths}</svg>
+  <div class="legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${s.name}</span>`).join("")}<span style="margin-left:auto">last ${Math.round(span/60000)||"<1"} min</span></div></div>`}
+function donut(title,counts){const colors={"2xx":"#2fbf71","3xx":"#8aa0b6","4xx":"#F2A900","5xx":"#c8102e"};const tot=Object.values(counts).reduce((a,b)=>a+b,0)||1;let a=0;
+  const segs=Object.entries(counts).sort().map(([k,v])=>{const f=v/tot,a0=a;a+=f;const L=f>.5?1:0,r=60,c=70,p=t=>[c+r*Math.sin(2*Math.PI*t),c-r*Math.cos(2*Math.PI*t)];const[x0,y0]=p(a0),[x1,y1]=p(Math.min(a,.9999));
+   return `<path d="M${x0},${y0} A${r},${r} 0 ${L} 1 ${x1},${y1}" stroke="${colors[k]||"#2a5d8f"}" stroke-width="18" fill="none"><title>${k}: ${v}</title></path>`}).join("");
+  return `<div class="card chart"><h3>${title}</h3><div style="display:flex;align-items:center;gap:20px"><svg viewBox="0 0 140 140" style="width:140px;height:140px">${segs}<text x="70" y="76" text-anchor="middle" fill="#e8eef5" font-size="20" font-weight="700">${tot===1&&!Object.keys(counts).length?0:tot}</text></svg>
+  <div class="legend" style="flex-direction:column">${Object.entries(counts).sort().map(([k,v])=>`<span><i style="background:${colors[k]}"></i>${k}: ${v} (${Math.round(v/tot*100)}%)</span>`).join("")||"No requests yet."}</div></div></div>`}
+R.live=async function(){const d=await get("live?since="+liveLast);for(const x of d.samples){liveBuf.push(x);liveLast=x.t}if(liveBuf.length>900)liveBuf=liveBuf.slice(-900);
+  const status={};liveBuf.forEach(x=>Object.entries(x.status||{}).forEach(([k,v])=>status[k]=(status[k]||0)+v));
+  const pg=liveBuf.some(x=>x.db_total!=null);
+  $("#live").innerHTML=`<div class="charts">
+   ${lineChart("Network activity (server)",[{k:"net_rx_bps",name:"received",color:"#4ea3ff",fill:1},{k:"net_tx_bps",name:"sent",color:"#F2A900"}],fmtB)}
+   ${lineChart("API requests per second",[{k:"rps",name:"requests",color:"#4ea3ff",fill:1},{k:"eps",name:"errors",color:"#c8102e"}],fmtN(2))}
+   ${lineChart("API response time (ms)",[{k:"avg_ms",name:"average",color:"#2fbf71",fill:1},{k:"max_ms",name:"slowest",color:"#F2A900"}],fmtN(1))}
+   ${lineChart("API data in and out",[{k:"app_in_bps",name:"request bodies",color:"#4ea3ff",fill:1},{k:"app_out_bps",name:"responses",color:"#F2A900"}],fmtB)}
+   ${pg?lineChart("Database connections",[{k:"db_total",name:"total",color:"#4ea3ff",fill:1},{k:"db_active",name:"active",color:"#2fbf71"},{k:"db_idle",name:"idle",color:"#8aa0b6"}],fmtN(0),{min:5}):""}
+   ${pg?lineChart("Database work per second",[{k:"db_tps",name:"transactions",color:"#4ea3ff",fill:1},{k:"db_rows_written_ps",name:"rows written",color:"#c8102e"}],fmtN(1)):""}
+   ${lineChart("Database ping (ms)",[{k:"db_ping_ms",name:"SELECT 1 round trip",color:"#2fbf71",fill:1}],fmtN(2))}
+   ${lineChart("Server CPU (%)",[{k:"cpu_pct",name:"CPU busy",color:"#c8102e",fill:1}],fmtN(1),{max:100})}
+   ${lineChart("API memory (MB)",[{k:"rss_mb",name:"process memory",color:"#F2A900",fill:1}],fmtN(1),{min:10})}
+   ${donut("Response codes (last 30 min)",status)}
+  </div><div class="sub" style="margin-top:8px">Sampled every 2 seconds; the page keeps the last 30 minutes.</div>`};
+async function refresh(){try{await R[tab]();$("#status").className="pill ok";$("#status").textContent="API up";$("#updated").textContent="Updated "+new Date().toLocaleTimeString()}catch(e){$("#status").className="pill bad";$("#status").textContent="API not reachable";console.error(e)}}
 addEventListener("hashchange",()=>{const k=location.hash.slice(1);if(k&&k!==tab){tab=k;nav();refresh()}});
-nav();refresh();setInterval(()=>{if(!document.hidden)refresh()},5000);
+nav();refresh();setInterval(()=>{if(!document.hidden&&tab!=="live")refresh()},5000);setInterval(()=>{if(!document.hidden&&tab==="live")refresh()},2000);
 </script>
 </body>
 </html>

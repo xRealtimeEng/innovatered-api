@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,90 @@ def init_dashboard(app: Flask, *, engine: Engine, Base: Any, SessionLocal: sessi
 
     RequestLog.__table__.create(bind=engine, checkfirst=True)
 
+    # ---- live samples for the graphs (in memory, every 2 s, last 30 min) ----
+    _live_lock = threading.Lock()
+    _live: dict[str, Any] = {"req": 0, "err": 0, "ms_sum": 0.0, "ms_max": 0.0,
+                             "bytes_in": 0, "bytes_out": 0, "status": {}}
+    samples: deque[dict[str, Any]] = deque(maxlen=900)
+    is_pg = engine.dialect.name == "postgresql"
+
+    def _net_bytes() -> tuple[int, int]:
+        rx = tx = 0
+        try:
+            for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
+                name, data = line.split(":", 1)
+                if name.strip() == "lo":
+                    continue
+                f = data.split()
+                rx += int(f[0]); tx += int(f[8])
+        except Exception:
+            pass
+        return rx, tx
+
+    def _cpu() -> tuple[int, int]:
+        try:
+            f = [int(x) for x in Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]]
+            return sum(f), f[3] + (f[4] if len(f) > 4 else 0)
+        except Exception:
+            return 0, 0
+
+    def _sampler() -> None:
+        prev_net, prev_cpu, prev_t = _net_bytes(), _cpu(), time.time()
+        prev_db: dict[str, int] | None = None
+        while True:
+            time.sleep(2)
+            now = time.time(); dt = max(0.001, now - prev_t); prev_t = now
+            with _live_lock:
+                snap = dict(_live); snap["status"] = dict(_live["status"])
+                for k in ("req", "err", "bytes_in", "bytes_out"):
+                    _live[k] = 0
+                _live["ms_sum"] = 0.0; _live["ms_max"] = 0.0; _live["status"] = {}
+            net = _net_bytes(); cpu = _cpu()
+            tot, idle = cpu[0] - prev_cpu[0], cpu[1] - prev_cpu[1]
+            sample: dict[str, Any] = {
+                "t": int(now * 1000),
+                "rps": round(snap["req"] / dt, 2), "eps": round(snap["err"] / dt, 2),
+                "avg_ms": round(snap["ms_sum"] / snap["req"], 2) if snap["req"] else 0,
+                "max_ms": round(snap["ms_max"], 2),
+                "app_in_bps": round(snap["bytes_in"] / dt), "app_out_bps": round(snap["bytes_out"] / dt),
+                "net_rx_bps": round((net[0] - prev_net[0]) / dt), "net_tx_bps": round((net[1] - prev_net[1]) / dt),
+                "cpu_pct": round(100 * (1 - idle / tot), 1) if tot > 0 else 0,
+                "load1": round(os.getloadavg()[0], 2), "status": snap["status"],
+            }
+            try:
+                sample["rss_mb"] = round(int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1048576, 1)
+            except Exception:
+                sample["rss_mb"] = None
+            prev_net, prev_cpu = net, cpu
+            try:
+                t0 = time.perf_counter()
+                with engine.connect() as c:
+                    c.execute(text("SELECT 1"))
+                    sample["db_ping_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+                    if is_pg:
+                        st = c.execute(text("""SELECT count(*) FILTER (WHERE state='active') AS active,
+                                  count(*) FILTER (WHERE state LIKE 'idle%') AS idle, count(*) AS total
+                                  FROM pg_stat_activity WHERE datname = current_database()""")).mappings().one()
+                        sample.update(db_active=st["active"], db_idle=st["idle"], db_total=st["total"])
+                        d = c.execute(text("""SELECT xact_commit, xact_rollback, tup_returned, tup_fetched,
+                                  tup_inserted + tup_updated + tup_deleted AS tup_written, blks_hit, blks_read
+                                  FROM pg_stat_database WHERE datname = current_database()""")).mappings().one()
+                        d = {k: int(v or 0) for k, v in d.items()}
+                        if prev_db:
+                            sample["db_tps"] = round((d["xact_commit"] + d["xact_rollback"] - prev_db["xact_commit"] - prev_db["xact_rollback"]) / dt, 2)
+                            sample["db_rows_read_ps"] = round((d["tup_returned"] - prev_db["tup_returned"]) / dt, 1)
+                            sample["db_rows_written_ps"] = round((d["tup_written"] - prev_db["tup_written"]) / dt, 2)
+                            hit = d["blks_hit"] - prev_db["blks_hit"]; rd = d["blks_read"] - prev_db["blks_read"]
+                            sample["db_cache_hit_pct"] = round(100 * hit / (hit + rd), 1) if hit + rd else 100.0
+                        prev_db = d
+            except Exception as e:  # keep sampling even if the DB blips
+                sample["db_error"] = str(e)[:200]
+            sample["sessions"] = len(tokens)
+            samples.append(sample)
+
+    if os.environ.get("DASHBOARD_ENABLED") == "1":
+        threading.Thread(target=_sampler, name="dash-sampler", daemon=True).start()
+
     # ---- request logging (every API call except the dashboard itself) ----
     @app.before_request
     def _start_timer():
@@ -59,6 +145,14 @@ def init_dashboard(app: Flask, *, engine: Engine, Base: Any, SessionLocal: sessi
                     or request.headers.get("User-Agent") == "red-dashboard-check"):
                 return resp
             ms = (time.perf_counter() - getattr(g, "_t0", time.perf_counter())) * 1000
+            with _live_lock:
+                _live["req"] += 1
+                _live["err"] += resp.status_code >= 400
+                _live["ms_sum"] += ms
+                _live["ms_max"] = max(_live["ms_max"], ms)
+                _live["bytes_in"] += request.content_length or 0
+                _live["bytes_out"] += resp.calculate_content_length() or 0
+                _live["status"][str(resp.status_code)[0] + "xx"] = _live["status"].get(str(resp.status_code)[0] + "xx", 0) + 1
             with SessionLocal() as db:
                 db.add(RequestLog(method=request.method, path=request.path[:500],
                                   endpoint=request.endpoint, status=resp.status_code,
@@ -293,5 +387,10 @@ def init_dashboard(app: Flask, *, engine: Engine, Base: Any, SessionLocal: sessi
             results.append({"path": path, "status": resp.status_code,
                             "ms": round((time.perf_counter() - t0) * 1000, 1), "body": resp.get_json(silent=True)})
         return jsonify(results)
+
+    @bp.get("/api/live")
+    def live():
+        since = int(request.args.get("since", 0))
+        return jsonify({"interval_s": 2, "samples": [x for x in samples if x["t"] > since]})
 
     app.register_blueprint(bp)
