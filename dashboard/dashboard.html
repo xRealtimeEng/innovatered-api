@@ -38,6 +38,12 @@
   .charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:12px}
   .chart .legend{display:flex;gap:12px;font-size:12px;color:var(--mute);margin-top:4px}.chart .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle}
   .chart .now{float:right;font-size:13px;color:var(--ink)}
+  .er{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#081624}
+  .er svg{width:auto;max-width:none}
+  .er .tb{cursor:pointer} .er .tb:hover rect.hd{fill:#a00d25}
+  .bar{height:8px;border-radius:4px;background:#2a5d8f;display:inline-block;vertical-align:middle}
+  .chip{display:inline-block;padding:1px 7px;margin:1px 3px 1px 0;border-radius:6px;font-size:11px;border:1px solid var(--line)}
+  .chip.r{color:#4ea3ff;border-color:#24527d} .chip.w{color:#ff6b81;border-color:#7d2433} .chip.k{color:var(--gold);border-color:#6b5310}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} @media(max-width:900px){.row{grid-template-columns:1fr}}
   .kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px} .kv div:nth-child(odd){color:var(--mute)}
   footer{color:var(--mute);font-size:12px;padding:20px 22px;text-align:center}
@@ -62,7 +68,7 @@
 </main>
 <footer>Local and private: this page only answers on this machine. Live graphs update every 2 seconds, other tabs every 5. <span id="updated"></span></footer>
 <script>
-const TABS=[["live","Live"],["overview","Overview"],["database","Database"],["connections","Connections"],["traffic","Traffic"],["users","Users"],["routes","Endpoints"],["browse","Browse data"]];
+const TABS=[["live","Live"],["overview","Overview"],["database","Database"],["connections","Connections"],["traffic","Traffic"],["users","Users"],["routes","APIs & integrations"],["browse","Browse data"]];
 let tab=location.hash.slice(1)||"live", browseTable=null;
 const $=s=>document.querySelector(s);
 const esc=v=>v==null?'<span class="sub">–</span>':String(v).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -102,7 +108,7 @@ const R={
    <div>Started</div><div>${new Date(o.started_at).toLocaleString()}</div>
   </div></div></div>`;
   $("#status").className="pill ok";$("#status").textContent="API up";},
- async database(){const ts=await get("tables");
+ async database_old(){const ts=await get("tables");
   $("#database").innerHTML=`<div class="grid">${ts.map(t=>card(t.name,t.rows,(t.stats?t.stats.total_size+" · ":"")+t.columns.length+" columns")).join("")}</div>`+
   ts.map(t=>`<h2>${esc(t.name)} <span class="sub">${t.rows} rows</span></h2><div class="row"><div>${tableHTML([["name","Column"],["type","Type"],["nullable","Null?"],["pk","Key"]],t.columns,{pk:v=>v?'<span style="color:var(--gold)">PK</span>':"",nullable:v=>v?"yes":"no",name:v=>`<code>${esc(v)}</code>`})}
    ${t.indexes.length?`<div class="sub" style="margin-top:6px">Indexes: ${t.indexes.map(i=>`<code>${esc(i.name)}</code> (${i.columns.join(", ")}${i.unique?", unique":""})`).join(" · ")}</div>`:""}
@@ -124,7 +130,7 @@ const R={
   $("#users").innerHTML=`<div class="grid">${card("Users",u.users.length)}${card("Signed in now",u.users.filter(x=>x.active_sessions).length)}${card("Contact messages",u.contact_messages.length,"latest 25 shown")}</div>
   <h2>Users</h2>${tableHTML([["id","ID"],["email","Email"],["name","Name"],["created_at","Joined"],["last_seen","Last seen"],["active_sessions","Sessions"]],u.users,{created_at:ago,last_seen:ago,active_sessions:v=>v?`<span class="s2">${v}</span>`:0})}
   <h2>Contact messages</h2>${tableHTML([["id","ID"],["created_at","When"],["name","Name"],["email","Email"],["company","Company"],["note","Note"]],u.contact_messages,{created_at:ago})}`;},
- async routes(){const r=await get("routes");
+ async routes_old(){const r=await get("routes");
   $("#routes").innerHTML=`<h2>API endpoints</h2>${tableHTML([["methods","Methods"],["rule","Path"],["endpoint","Handler"]],r,{methods:v=>v.map(m=>`<span class="pill">${m}</span>`).join(" "),rule:v=>`<code>${esc(v)}</code>`})}`;},
  async browse(){const ts=await get("tables");if(!browseTable&&ts.length)browseTable=ts[0].name;
   const d=browseTable?await get("table/"+encodeURIComponent(browseTable)+"?limit=100"):{columns:[],rows:[]};
@@ -168,6 +174,81 @@ R.live=async function(){const d=await get("live?since="+liveLast);for(const x of
    ${lineChart("API memory (MB)",[{k:"rss_mb",name:"process memory",color:"#F2A900",fill:1}],fmtN(1),{min:10})}
    ${donut("Response codes (last 30 min)",status)}
   </div><div class="sub" style="margin-top:8px">Sampled every 2 seconds; the page keeps the last 30 minutes.</div>`};
+
+let dbSel=null,apiCache=null;
+function erDiagram(m){
+  const BW=230,RH=20,HH=30,GX=90,GY=40,perRow=Math.max(1,Math.min(4,m.tables.length));
+  const fkCols=new Set(m.relationships.map(r=>r.from+"."+r.from_cols[0]));
+  const pos={};let x=20,y=20,rowH=0;
+  m.tables.forEach((t,i)=>{if(i&&i%perRow===0){x=20;y+=rowH+GY;rowH=0}const h=HH+t.columns.length*RH+8;pos[t.name]={x,y,h,t};rowH=Math.max(rowH,h);x+=BW+GX});
+  const W=20+perRow*(BW+GX),H=y+rowH+20;
+  const colY=(t,c)=>{const p=pos[t];const i=p.t.columns.findIndex(k=>k.name===c);return p.y+HH+Math.max(0,i)*RH+RH/2+4};
+  const links=m.relationships.map(r=>{const a=pos[r.from],b=pos[r.to];if(!a||!b)return"";
+    const y1=colY(r.from,r.from_cols[0]),y2=colY(r.to,r.to_cols[0]);const right=a.x<b.x;
+    const x1=right?a.x+BW:a.x,x2=right?b.x:b.x+BW,dx=right?60:-60;
+    return `<path d="M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}" fill="none" stroke="${r.kind==="inferred"?"#F2A900":"#4ea3ff"}" stroke-width="2" ${r.kind==="inferred"?'stroke-dasharray="6 4"':""}><title>${r.from}.${r.from_cols.join(",")} → ${r.to}.${r.to_cols.join(",")} (${r.kind})</title></path><circle cx="${x2}" cy="${y2}" r="4" fill="${r.kind==="inferred"?"#F2A900":"#4ea3ff"}"/>`}).join("");
+  const boxes=Object.values(pos).map(({x,y,h,t})=>`<g class="tb" onclick="dbSel='${t.name}';refresh()">
+    <rect x="${x}" y="${y}" width="${BW}" height="${h}" rx="10" fill="#12283f" stroke="${t.name===dbSel?"#c8102e":"#1f3a57"}" stroke-width="${t.name===dbSel?2:1}"/>
+    <rect class="hd" x="${x}" y="${y}" width="${BW}" height="${HH}" rx="10" fill="#c8102e"/><rect x="${x}" y="${y+HH-10}" width="${BW}" height="10" fill="#c8102e" class="hd"/>
+    <text x="${x+12}" y="${y+20}" fill="#fff" font-size="13" font-weight="700">${esc(t.name)}</text><text x="${x+BW-12}" y="${y+20}" fill="#ffd7dd" font-size="11" text-anchor="end">${t.rows} rows</text>
+    ${t.columns.map((c,i)=>{const cy=y+HH+i*RH+RH/2+8;const key=c.pk?"PK":fkCols.has(t.name+"."+c.name)?"FK":c.unique?"UQ":"";
+      return `<text x="${x+12}" y="${cy}" font-size="12" fill="${c.hidden?"#5d7690":"#e8eef5"}" font-family="ui-monospace,monospace">${esc(c.name)}</text>
+      <text x="${x+BW-40}" y="${cy}" font-size="10" fill="#8aa0b6" text-anchor="end">${esc(c.type.toLowerCase().slice(0,16))}${c.nullable?"":" *"}</text>
+      <text x="${x+BW-10}" y="${cy}" font-size="10" fill="${key==="PK"?"#F2A900":key==="FK"?"#4ea3ff":"#2fbf71"}" text-anchor="end" font-weight="700">${key}</text>`}).join("")}</g>`).join("");
+  return `<div class="er"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${links}${boxes}</svg></div>
+  <div class="legend sub" style="margin-top:6px">Click a table to inspect it. <span style="color:#F2A900">PK</span> primary key · <span style="color:#4ea3ff">FK</span> link to another table · <span style="color:#2fbf71">UQ</span> unique · * required. Solid blue line = declared foreign key; dashed gold line = link implied by a <code>*_id</code> column with no foreign key yet.</div>`}
+function hbars(items,fmt){const max=Math.max(1,...items.map(i=>i.v));return `<div class="card">${items.map(i=>`<div style="display:grid;grid-template-columns:150px 1fr 90px;gap:8px;align-items:center;margin:5px 0"><code>${esc(i.k)}</code><span><span class="bar" style="width:${Math.max(2,i.v/max*100)}%;background:${i.c||"#2a5d8f"}"></span></span><span class="sub" style="text-align:right">${fmt(i.v)}</span></div>`).join("")}</div>`}
+function growthBars(g){if(!g.length)return'<div class="sub">No time column on this table.</div>';const max=Math.max(1,...g.map(d=>d.count));const W=g.length*12;
+  return `<svg viewBox="0 0 ${W} 90" preserveAspectRatio="none" style="height:90px">${g.map((d,i)=>`<rect x="${i*12+1}" y="${88-d.count/max*80}" width="10" height="${d.count/max*80}" fill="#c8102e"><title>${d.day}: ${d.count} rows</title></rect>`).join("")}</svg><div class="sub">New rows per day, last 31 days (peak ${max}).</div>`}
+R.database=async function(){
+  const [m,a]=await Promise.all([get("dbmap"),get("apimap")]);apiCache=a;
+  if(!dbSel||!m.tables.find(t=>t.name===dbSel))dbSel=m.tables.length?m.tables[0].name:null;
+  const p=dbSel?await get("profile/"+encodeURIComponent(dbSel)):null;const t=m.tables.find(x=>x.name===dbSel);
+  const nIdx=m.tables.reduce((s,t)=>s+t.indexes.length,0),nCols=m.tables.reduce((s,t)=>s+t.columns.length,0);
+  const usedBy=a.routes.filter(r=>r.reads.includes(dbSel)||r.writes.includes(dbSel));
+  const pc=p?Object.fromEntries(p.columns.map(c=>[c.name,c])):{};
+  $("#database").innerHTML=`<div class="grid">
+    ${card("Databases on server",m.databases.length,m.databases.map(d=>d.name+(d.is_current?" (this one)":"")).join(", "))}
+    ${card("Tables",m.tables.length,nCols+" columns")}
+    ${card("Total rows",m.total_rows.toLocaleString())}
+    ${m.total_bytes!=null?card("Size of tables",bytes(m.total_bytes),"data plus indexes"):""}
+    ${card("Relationships",m.relationships.length,m.relationships.filter(r=>r.kind==="foreign key").length+" declared, "+m.relationships.filter(r=>r.kind==="inferred").length+" implied")}
+    ${card("Indexes",nIdx)}
+    ${card("APIs using the DB",a.routes.filter(r=>r.reads.length||r.writes.length>1).length+" of "+a.routes.length)}
+  </div>
+  <h2>Structure and relationships</h2>${erDiagram(m)}
+  <div class="row"><div><h2>Rows per table</h2>${hbars(m.tables.map(t=>({k:t.name,v:t.rows})),v=>v.toLocaleString())}</div>
+  <div><h2>${m.total_bytes!=null?"Disk size per table":"Databases"}</h2>${m.total_bytes!=null?hbars(m.tables.map(t=>({k:t.name,v:t.size_bytes||0,c:"#F2A900"})),bytes):""}
+   ${tableHTML([["name","Database"],["size","Size"],["connections","Connections"]],m.databases,{name:(v,r)=>esc(v)+(r.is_current?' <span class="pill ok">this API</span>':"")})}</div></div>
+  ${t?`<h2>Table: ${esc(t.name)} <span class="sub">${t.rows.toLocaleString()} rows${t.model?" · model "+esc(t.model):""}${t.size_bytes!=null?" · "+bytes(t.size_bytes):""}</span></h2>
+  <div class="tabs">${m.tables.map(x=>`<button class="${x.name===dbSel?"on":""}" onclick="dbSel='${x.name}';refresh()">${esc(x.name)}</button>`).join("")}</div>
+  ${tableHTML([["name","Column"],["type","Type"],["key","Key"],["nullable","Required"],["nulls","Empty"],["distinct","Distinct"],["range","Range / average"],["top","Most common values"]],
+    t.columns.map(c=>({...c,key:c.pk?"PK":m.relationships.some(r=>r.from===t.name&&r.from_cols.includes(c.name))?"FK":c.unique?"UQ":"",...(pc[c.name]||{})})),
+    {name:v=>`<code>${esc(v)}</code>`,nullable:v=>v?"no":"yes",key:v=>v?`<span class="chip k">${v}</span>`:"",
+     nulls:(v,r)=>r.hidden?'<span class="sub">hidden</span>':v==null?"–":`${v}${p.rows?` <span class="sub">(${Math.round(v/p.rows*100)}%)</span>`:""}`,
+     range:(v,r)=>r.min!=null?`<span class="mono">${esc(String(r.min).slice(0,19))} → ${esc(String(r.max).slice(0,19))}</span>${r.avg!=null?`<div class="sub">avg ${r.avg}</div>`:""}`:"",
+     top:(v,r)=>(v||[]).map(x=>`<div style="display:flex;gap:6px;align-items:center"><span class="bar" style="width:${Math.max(4,x.count/(p.rows||1)*80)}px"></span><span class="mono">${esc(String(x.value).slice(0,28))}</span><span class="sub">${x.count}</span></div>`).join("")})}
+  <div class="row"><div><h2>Growth</h2><div class="card">${growthBars(p.growth)}</div>
+   <h2>Indexes</h2>${tableHTML([["name","Index"],["columns","Columns"],["unique","Unique"],["scans","Times used"],["size_bytes","Size"]],t.indexes,{name:v=>`<code>${esc(v)}</code>`,columns:v=>v.join(", "),unique:v=>v?"yes":"no",size_bytes:bytes})}</div>
+   <div><h2>APIs that use this table</h2>${tableHTML([["methods","Method"],["rule","Path"],["use","Uses it to"],["calls_24h","Calls (24h)"]],usedBy.map(r=>({...r,use:[r.reads.includes(dbSel)?"read":"",r.writes.includes(dbSel)?"write":""].filter(Boolean).join(" + ")})),
+     {methods:v=>v.join(" "),rule:v=>`<code>${esc(v)}</code>`,use:v=>v.split(" + ").map(u=>`<span class="chip ${u==="read"?"r":"w"}">${u}</span>`).join("")})}
+   <p><a href="#browse" style="color:var(--gold)" onclick="browseTable='${t.name}'">Browse the rows of ${esc(t.name)} →</a></p></div></div>`:""}`};
+function flowDiagram(a,tables){const routes=a.routes,RH=26,W=760,H=Math.max(routes.length,tables.length)*RH+30,lx=250,rx=560;
+  const ry=i=>20+i*RH,ty=i=>20+i*RH*Math.max(1,routes.length/Math.max(1,tables.length))*0.999;
+  const tIdx=Object.fromEntries(tables.map((t,i)=>[t,i]));
+  const lines=routes.flatMap((r,i)=>[...r.reads.map(t=>[t,"#4ea3ff"]),...r.writes.filter(t=>t!=="request_log").map(t=>[t,"#ff6b81"])].map(([t,c])=>tIdx[t]==null?"":`<path d="M${lx},${ry(i)} C${lx+150},${ry(i)} ${rx-150},${ty(tIdx[t])} ${rx},${ty(tIdx[t])}" stroke="${c}" stroke-width="2" fill="none" opacity=".85"/>`)).join("");
+  return `<div class="er"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${lines}
+   ${routes.map((r,i)=>`<text x="${lx-10}" y="${ry(i)+4}" text-anchor="end" fill="#e8eef5" font-size="12" font-family="ui-monospace,monospace">${r.methods.join(",")} ${esc(r.rule)}</text><circle cx="${lx}" cy="${ry(i)}" r="4" fill="#8aa0b6"/>`).join("")}
+   ${tables.map((t,i)=>`<rect x="${rx}" y="${ty(i)-11}" width="170" height="22" rx="6" fill="#c8102e"/><text x="${rx+10}" y="${ty(i)+4}" fill="#fff" font-size="12" font-weight="700">${esc(t)}</text>`).join("")}
+  </svg></div><div class="sub" style="margin-top:6px"><span style="color:#4ea3ff">Blue</span> = reads, <span style="color:#ff6b81">red</span> = writes. Every call also writes one row to <code>request_log</code> (not drawn).</div>`}
+R.routes=async function(){const [a,i,m]=await Promise.all([get("apimap"),get("integrations"),get("dbmap")]);
+  $("#routes").innerHTML=`<h2>Integrations</h2><div class="grid">${i.integrations.map(x=>`<div class="card"><h3>${esc(x.name)}</h3><div style="font-size:16px;font-weight:700;color:${/down|missing/.test(x.status)?"#c8102e":"#2fbf71"}">${esc(x.status)}</div><div class="sub">${esc(x.kind)}${x.ping_ms!=null?" · "+x.ping_ms+" ms":""}</div><div class="sub mono" style="margin-top:6px;word-break:break-all">${esc(x.detail)}</div></div>`).join("")}</div>
+  <h2>Which APIs touch which tables</h2>${flowDiagram(a,m.tables.map(t=>t.name).filter(n=>n!=="request_log"))}
+  <h2>API endpoints</h2>${tableHTML([["methods","Method"],["rule","Path"],["auth","Sign-in"],["reads","Reads"],["writes","Writes"],["notes","Also"],["calls_24h","Calls (24h)"],["errors_24h","Errors"],["avg_ms","Avg ms"]],a.routes,
+   {methods:v=>v.map(x=>`<span class="pill">${x}</span>`).join(" "),rule:v=>`<code>${esc(v)}</code>`,auth:v=>v?'<span class="chip k">required</span>':'<span class="sub">open</span>',
+    reads:v=>v.map(t=>`<span class="chip r">${esc(t)}</span>`).join(""),writes:v=>v.map(t=>`<span class="chip w">${esc(t)}</span>`).join(""),notes:v=>v.map(n=>`<span class="sub">${esc(n)}</span>`).join("<br>"),errors_24h:v=>v?`<span class="s5">${v}</span>`:0})}
+  <div class="row"><div><h2>Settings the API reads</h2>${tableHTML([["name","Variable"],["set","Set?"],["value","Value"]],i.env,{name:v=>`<code>${esc(v)}</code>`,set:v=>v?'<span class="s2">yes</span>':'<span class="sub">default</span>',value:v=>`<span class="mono">${esc(v)}</span>`})}</div>
+  <div><h2>Websites allowed to call the API</h2>${tableHTML([["o","Origin"]],i.cors.map(o=>({o})),{o:v=>`<code>${esc(v)}</code>`})}</div></div>`};
 async function refresh(){try{await R[tab]();$("#status").className="pill ok";$("#status").textContent="API up";$("#updated").textContent="Updated "+new Date().toLocaleTimeString()}catch(e){$("#status").className="pill bad";$("#status").textContent="API not reachable";console.error(e)}}
 addEventListener("hashchange",()=>{const k=location.hash.slice(1);if(k&&k!==tab){tab=k;nav();refresh()}});
 nav();refresh();setInterval(()=>{if(!document.hidden&&tab!=="live")refresh()},5000);setInterval(()=>{if(!document.hidden&&tab==="live")refresh()},2000);
