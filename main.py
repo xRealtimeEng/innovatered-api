@@ -22,6 +22,8 @@ from sqlalchemy import DateTime, Integer, String, Text, create_engine, select, t
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from dashboard import init_dashboard
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -128,6 +130,10 @@ def create_app() -> Flask:
     with engine.begin() as conn:
         conn.execute(text("SELECT 1"))
     _seed_demo_user()
+
+    # Request log + local-only dev dashboard at /_dash/ (DASHBOARD_ENABLED=1).
+    init_dashboard(app, engine=engine, Base=Base, SessionLocal=SessionLocal,
+                   tokens=_tokens, user_model=User, contact_model=ContactMessage)
 
     @app.get("/health")
     def health():

@@ -88,3 +88,23 @@ Ask Ceaser for an M365 test mailbox if real SMTP is needed later.
 Allows localhost Vite ports, `https://*.innovatered.pages.dev`,
 `https://*.innovatered-rps.pages.dev`, and www/rps for later. Bearer tokens preferred
 for cross-origin CF Pages frontends.
+
+## Local dev dashboard (private)
+
+A small dashboard for watching and debugging the API and its database: health checks,
+DB size and cache hit rate, tables and columns, live Postgres connections and locks,
+request traffic per minute and per endpoint, users and sessions, contact messages,
+the endpoint list, and a row browser (password hashes hidden).
+
+It is **off unless `DASHBOARD_ENABLED=1`** and only answers requests from this machine
+(127.0.0.1 / ::1). Every API request is also written to a `request_log` table.
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+export DATABASE_URL=postgresql://red:red_local_dev@localhost:5432/red_dev   # or leave unset for SQLite
+export DASHBOARD_ENABLED=1
+.venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:8010 main:app
+# open http://127.0.0.1:8010/_dash/
+```
+
+Code lives in `dashboard/` (`__init__.py` for the API, `dashboard.html` for the page, no build step).
